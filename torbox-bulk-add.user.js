@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorBox Bulk Magnet Sender
 // @namespace    https://torbox.app/
-// @version      1.1.0
+// @version      1.1.1
 // @description  Scan the current page for magnet links and send them to TorBox
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -456,18 +456,58 @@
         if (host !== 'torbox.app' && !host.endsWith('.torbox.app')) return false;
 
         const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
         let lastSaved = getApiKey();
+
+        function persistToken(token, label = 'TorBox API key synced to Bulk Sender') {
+            if (!token || token === lastSaved) return;
+            lastSaved = token;
+            GM_setValue(API_KEY_STORAGE, token);
+            showToast(label);
+        }
 
         function saveToken(rawHeader) {
             if (typeof rawHeader !== 'string') return;
             const match = rawHeader.match(/^Bearer\s+(.+)$/i);
             if (!match) return;
-            const token = match[1].trim();
-            if (!token || token === lastSaved) return;
-            lastSaved = token;
-            GM_setValue(API_KEY_STORAGE, token);
-            showToast('TorBox API key synced to Bulk Sender');
+            persistToken(match[1].trim());
         }
+
+        function scanStorageAndSettingsDom() {
+            try {
+                // 1. Prefer permanent API key visible on /settings
+                if (location.pathname.includes('settings') && document.body) {
+                    const candidates = document.querySelectorAll('input, code, pre');
+                    for (const el of candidates) {
+                        const val = ('value' in el ? el.value : el.textContent) || '';
+                        const match = val.trim().match(UUID_RE);
+                        if (match) {
+                            persistToken(match[0], 'TorBox permanent API key synced');
+                            return true;
+                        }
+                    }
+                }
+
+                // 2. Fallback to torbox_session_token in localStorage
+                const sessionToken = window.localStorage?.getItem('torbox_session_token');
+                if (sessionToken && !lastSaved) {
+                    persistToken(sessionToken.trim(), 'TorBox session token synced');
+                    return true;
+                }
+            } catch (_) {
+                // Ignore storage/DOM access errors.
+            }
+            return false;
+        }
+
+        // Poll briefly after load so React/Next hydration & settings DOM are caught.
+        let attempts = 0;
+        const pollTimer = setInterval(() => {
+            attempts++;
+            if (scanStorageAndSettingsDom() || attempts >= 10) {
+                clearInterval(pollTimer);
+            }
+        }, 500);
 
         function extractAuthHeader(headers) {
             if (!headers) return null;
