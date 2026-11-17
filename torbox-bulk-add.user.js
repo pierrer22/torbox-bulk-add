@@ -1,15 +1,16 @@
 // ==UserScript==
 // @name         TorBox Bulk Magnet Sender
 // @namespace    https://torbox.app/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Scan the current page for magnet links and send them to TorBox
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @connect      api.torbox.app
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
@@ -415,6 +416,118 @@
         }
     }
 
+    function showToast(message) {
+        const render = () => {
+            if (!document.body) return;
+            const toast = document.createElement('div');
+            toast.textContent = message;
+            Object.assign(toast.style, {
+                position: 'fixed',
+                bottom: '16px',
+                right: '16px',
+                zIndex: '2147483647',
+                background: '#0f172a',
+                color: '#4ade80',
+                border: '1px solid #334155',
+                borderRadius: '8px',
+                padding: '8px 12px',
+                fontFamily: 'system-ui, -apple-system, sans-serif',
+                fontSize: '13px',
+                fontWeight: '600',
+                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.35)',
+            });
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3500);
+        };
+
+        if (document.body) {
+            render();
+        } else {
+            document.addEventListener('DOMContentLoaded', render, { once: true });
+        }
+    }
+
+    /**
+     * When running on torbox.app, intercept Authorization Bearer headers sent to
+     * api.torbox.app and persist the token into GM storage for all sites.
+     */
+    function setupTorboxAutoGrab() {
+        const host = location.hostname;
+        if (host !== 'torbox.app' && !host.endsWith('.torbox.app')) return false;
+
+        const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        let lastSaved = getApiKey();
+
+        function saveToken(rawHeader) {
+            if (typeof rawHeader !== 'string') return;
+            const match = rawHeader.match(/^Bearer\s+(.+)$/i);
+            if (!match) return;
+            const token = match[1].trim();
+            if (!token || token === lastSaved) return;
+            lastSaved = token;
+            GM_setValue(API_KEY_STORAGE, token);
+            showToast('TorBox API key synced to Bulk Sender');
+        }
+
+        function extractAuthHeader(headers) {
+            if (!headers) return null;
+            if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+                return headers.get('Authorization') || headers.get('authorization');
+            }
+            if (Array.isArray(headers)) {
+                const pair = headers.find(([k]) => String(k).toLowerCase() === 'authorization');
+                return pair ? pair[1] : null;
+            }
+            if (typeof headers === 'object') {
+                const key = Object.keys(headers).find((k) => k.toLowerCase() === 'authorization');
+                return key ? headers[key] : null;
+            }
+            return null;
+        }
+
+        if (typeof pageWin.fetch === 'function') {
+            const origFetch = pageWin.fetch;
+            pageWin.fetch = function (input, init) {
+                try {
+                    const url = typeof input === 'string' ? input : input?.url || '';
+                    if (url.includes('api.torbox.app')) {
+                        const header =
+                            extractAuthHeader(init?.headers) ||
+                            extractAuthHeader(input?.headers);
+                        saveToken(header);
+                    }
+                } catch (_) {
+                    // Never break page fetch calls.
+                }
+                return origFetch.apply(this, arguments);
+            };
+        }
+
+        const origOpen = pageWin.XMLHttpRequest?.prototype?.open;
+        const origSetHeader = pageWin.XMLHttpRequest?.prototype?.setRequestHeader;
+        if (origOpen && origSetHeader) {
+            pageWin.XMLHttpRequest.prototype.open = function (_method, url) {
+                this._torboxUrl = typeof url === 'string' ? url : '';
+                return origOpen.apply(this, arguments);
+            };
+            pageWin.XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+                try {
+                    if (
+                        this._torboxUrl?.includes('api.torbox.app') &&
+                        String(name).toLowerCase() === 'authorization'
+                    ) {
+                        saveToken(String(value));
+                    }
+                } catch (_) {
+                    // Never break page XHR calls.
+                }
+                return origSetHeader.apply(this, arguments);
+            };
+        }
+
+        return true;
+    }
+
     function init() {
         const initial = scanMagnetLinks();
         let ui = null;
@@ -435,7 +548,16 @@
 
         GM_registerMenuCommand('Send selected magnets to TorBox', () => handleBulkSend(ui));
         GM_registerMenuCommand('Set TorBox API Key', () => promptForApiKey(true));
+        GM_registerMenuCommand('Grab API Key from TorBox', () =>
+            window.open('https://torbox.app/settings', '_blank')
+        );
     }
 
-    init();
+    if (!setupTorboxAutoGrab()) {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init, { once: true });
+        } else {
+            init();
+        }
+    }
 })();
